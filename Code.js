@@ -3,7 +3,8 @@
  *
  * Match: Sheet1 D (catalog), F (description) vs Price updater A, B.
  * Write: Price updater C (price) -> Sheet1 Z;
- *        Price updater A (catalog) -> Sheet1 AA; tier -> AB.
+ *        Price updater A (catalog) -> Sheet1 AA;
+ *        Price updater B (description) -> Sheet1 AB; tier -> AC.
  */
 const CONFIG = {
   masterSheet: 'Sheet1',
@@ -39,9 +40,9 @@ function runPriceCrossCheck() {
   const uDisplay = uRange.getDisplayValues(), uRaw = uRange.getValues();
   const masters = mData.map((r, i) => ({ i, catalog: r[0], key: normaliseCatalog_(r[0]), desc: normaliseDescription_(r[2]) })).filter(x => x.key);
   const sources = uDisplay.map((r, i) => ({
-    i, key: normaliseCatalog_(r[0]), desc: normaliseDescription_(r[1]), catalog: uRaw[i][0], price: uRaw[i][2]
+    i, key: normaliseCatalog_(r[0]), desc: normaliseDescription_(r[1]), catalog: uRaw[i][0], description: uRaw[i][1], price: uRaw[i][2]
   })).filter(x => x.key);
-  const output = Array.from({ length: mCount }, () => ['', '', '']);
+  const output = Array.from({ length: mCount }, () => ['', '', '', '']);
   const usedM = new Set(), usedU = new Set();
   const counts = { 100: 0, 95: 0, 90: 0, 80: 0, 40: 0 };
   const tiers = [100, 95, 90, 80, 40];
@@ -55,7 +56,7 @@ function runPriceCrossCheck() {
     if (!bucket || !bucket.length) return;
     const u = bucket.shift();
     usedM.add(m.i); usedU.add(u.i);
-    output[m.i] = [u.price, u.catalog, '100%'];
+    output[m.i] = [u.price, u.catalog, u.description, '100%'];
     counts[100]++;
   });
   // Exact catalog matches take precedence, regardless of description wording.
@@ -79,7 +80,7 @@ function runPriceCrossCheck() {
     candidates.forEach(({ m, u, score }) => {
       if (score < tier || usedM.has(m.i) || usedU.has(u.i)) return;
       usedM.add(m.i); usedU.add(u.i);
-      output[m.i] = [u.price, u.catalog, tier + '%'];
+      output[m.i] = [u.price, u.catalog, u.description, tier + '%'];
       counts[tier]++;
     });
   });
@@ -87,10 +88,10 @@ function runPriceCrossCheck() {
   const ui = SpreadsheetApp.getUi();
   const choice = ui.alert('Five-pass match preview',
     summary + '\nUnmatched master rows: ' + (masters.length - usedM.size) +
-    '\n\nApply results to Sheet1 columns Z:AB? Existing results will be replaced.',
+    '\n\nApply results to Sheet1 columns Z:AC? Existing results will be replaced.',
     ui.ButtonSet.YES_NO);
   if (choice !== ui.Button.YES) return;
-  master.getRange(2, 26, mCount, 3).setValues(output);
+  master.getRange(2, 26, mCount, 4).setValues(output);
   ss.toast(summary, 'Five-pass price matching', 10);
 }
 
