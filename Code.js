@@ -1,9 +1,9 @@
 /**
  * Master Material Sheet price cross-check.
  *
- * Match: Sheet1 column D <-> Price updater column A
- * Write: Price updater column B -> Sheet1 column Z
- *        Price updater column A -> Sheet1 column AA
+ * Match: Sheet1 D (catalog), F (description) vs Price updater A, B.
+ * Write: Price updater C (price) -> Sheet1 Z;
+ *        Price updater A (catalog) -> Sheet1 AA; tier -> AB.
  */
 const CONFIG = {
   masterSheet: 'Sheet1',
@@ -11,9 +11,11 @@ const CONFIG = {
   startRow: 2,
 
   masterCatalogColumn: 4, // D
+  masterDescriptionColumn: 6, // F
   outputStartColumn: 26, // Z
   updaterCatalogColumn: 1, // A
-  updaterValueColumn: 2 // B
+  updaterDescriptionColumn: 2, // B
+  updaterValueColumn: 3 // C
 };
 
 function onOpen() {
@@ -32,12 +34,12 @@ function runPriceCrossCheck() {
   const uLast = getLastNonEmptyRow_(updater, CONFIG.updaterCatalogColumn, CONFIG.startRow);
   if (mLast < 2 || uLast < 2) throw new Error('No catalog numbers found in the required columns.');
   const mCount = mLast - 1, uCount = uLast - 1;
-  const mData = master.getRange(2, 4, mCount, 1).getDisplayValues();
-  const uRange = updater.getRange(2, 1, uCount, 2);
+  const mData = master.getRange(2, 4, mCount, 3).getDisplayValues();
+  const uRange = updater.getRange(2, 1, uCount, 3);
   const uDisplay = uRange.getDisplayValues(), uRaw = uRange.getValues();
-  const masters = mData.map((r, i) => ({ i, catalog: r[0], key: normaliseCatalog_(r[0]) })).filter(x => x.key);
+  const masters = mData.map((r, i) => ({ i, catalog: r[0], key: normaliseCatalog_(r[0]), desc: normaliseDescription_(r[2]) })).filter(x => x.key);
   const sources = uDisplay.map((r, i) => ({
-    i, key: normaliseCatalog_(r[0]), catalog: uRaw[i][0], price: uRaw[i][1]
+    i, key: normaliseCatalog_(r[0]), desc: normaliseDescription_(r[1]), catalog: uRaw[i][0], price: uRaw[i][2]
   })).filter(x => x.key);
   const output = Array.from({ length: mCount }, () => ['', '', '']);
   const usedM = new Set(), usedU = new Set();
@@ -56,25 +58,26 @@ function runPriceCrossCheck() {
     output[m.i] = [u.price, u.catalog, '100%'];
     counts[100]++;
   });
-  const cache = new Map();
-  [95, 90, 80, 40].forEach(tier => {
-    const candidates = [];
-    masters.filter(m => !usedM.has(m.i)).forEach(m => {
-      sources.filter(u => !usedU.has(u.i)).forEach(u => {
-        const maxLen = Math.max(m.key.length, u.key.length);
-        if (100 * (1 - Math.abs(m.key.length - u.key.length) / maxLen) < tier) return;
-        const cacheKey = JSON.stringify([m.key, u.key]);
-        let score = cache.get(cacheKey);
-        if (score === undefined) {
-          score = catalogSimilarity_(m.key, u.key);
-          cache.set(cacheKey, score);
-        }
-        if (tiers.find(t => score + 1e-9 >= t) === tier) candidates.push({ m, u, score });
-      });
+  // Exact catalog matches take precedence, regardless of description wording.
+  // Fuzzy passes combine catalog (65%) and description (35%) similarity.
+  // A missing description is not allowed to create a fuzzy match.
+  const remainingM = masters.filter(m => !usedM.has(m.i));
+  const remainingU = sources.filter(u => !usedU.has(u.i));
+  const candidates = [];
+  remainingM.forEach(m => {
+    if (!m.desc) return;
+    remainingU.forEach(u => {
+      if (!u.desc) return;
+      const catalogScore = catalogSimilarity_(m.key, u.key);
+      const descriptionScore = catalogSimilarity_(m.desc, u.desc);
+      const score = 0.65 * catalogScore + 0.35 * descriptionScore;
+      if (score >= 40) candidates.push({ m, u, score });
     });
-    candidates.sort((a, b) => b.score - a.score || a.m.i - b.m.i || a.u.i - b.u.i);
-    candidates.forEach(({ m, u }) => {
-      if (usedM.has(m.i) || usedU.has(u.i)) return;
+  });
+  candidates.sort((a, b) => b.score - a.score || a.m.i - b.m.i || a.u.i - b.u.i);
+  [95, 90, 80, 40].forEach(tier => {
+    candidates.forEach(({ m, u, score }) => {
+      if (score < tier || usedM.has(m.i) || usedU.has(u.i)) return;
       usedM.add(m.i); usedU.add(u.i);
       output[m.i] = [u.price, u.catalog, tier + '%'];
       counts[tier]++;
@@ -105,6 +108,10 @@ function catalogSimilarity_(a, b) {
     prev = cur;
   }
   return 100 * (1 - prev[b.length] / longest);
+}
+
+function normaliseDescription_(description) {
+  return String(description || '').trim().toUpperCase().replace(/[^A-Z0-9]+/g, ' ').replace(/\\s+/g, ' ').trim();
 }
 
 function normaliseCatalog_(catalog) {
