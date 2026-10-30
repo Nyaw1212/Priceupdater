@@ -24,130 +24,87 @@ function onOpen() {
 }
 
 function runPriceCrossCheck() {
-  const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
-  const masterSheet = spreadsheet.getSheetByName(CONFIG.masterSheet);
-  const priceUpdaterSheet = spreadsheet.getSheetByName(CONFIG.priceUpdaterSheet);
-
-  if (!masterSheet || !priceUpdaterSheet) {
-    throw new Error(
-      'Expected sheets "' + CONFIG.masterSheet + '" and "' +
-        CONFIG.priceUpdaterSheet + '". Please confirm their names.'
-    );
-  }
-
-  const masterLastRow = getLastNonEmptyRow_(
-    masterSheet,
-    CONFIG.masterCatalogColumn,
-    CONFIG.startRow
-  );
-  const updaterLastRow = getLastNonEmptyRow_(
-    priceUpdaterSheet,
-    CONFIG.updaterCatalogColumn,
-    CONFIG.startRow
-  );
-
-  if (masterLastRow < CONFIG.startRow) {
-    throw new Error('No catalog numbers found in Sheet1 column D.');
-  }
-  if (updaterLastRow < CONFIG.startRow) {
-    throw new Error('No catalog numbers found in Price updater column A.');
-  }
-
-  const masterRowCount = masterLastRow - CONFIG.startRow + 1;
-  const updaterRowCount = updaterLastRow - CONFIG.startRow + 1;
-
-  const masterCatalogs = masterSheet
-    .getRange(CONFIG.startRow, CONFIG.masterCatalogColumn, masterRowCount, 1)
-    .getDisplayValues();
-
-  const updaterRange = priceUpdaterSheet.getRange(
-    CONFIG.startRow,
-    CONFIG.updaterCatalogColumn,
-    updaterRowCount,
-    2
-  );
-  const updaterDisplay = updaterRange.getDisplayValues();
-  const updaterValues = updaterRange.getValues();
-
-  // Key: normalised catalog number. Value: original A/B values.
-  // When Price updater has duplicates, the first row is used.
-  const updaterByCatalog = new Map();
-  const updaterCatalogs = new Set();
-  const duplicatesInUpdater = [];
-
-  updaterDisplay.forEach((row, index) => {
-    const key = normaliseCatalog_(row[0]);
-    if (!key) return;
-
-    updaterCatalogs.add(key);
-
-    if (updaterByCatalog.has(key)) {
-      duplicatesInUpdater.push(row[0]);
-      return;
-    }
-
-    updaterByCatalog.set(key, {
-      catalog: updaterValues[index][0],
-      price: updaterValues[index][1]
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const master = ss.getSheetByName(CONFIG.masterSheet);
+  const updater = ss.getSheetByName(CONFIG.priceUpdaterSheet);
+  if (!master || !updater) throw new Error('Missing Sheet1 or Price updater sheet.');
+  const mLast = getLastNonEmptyRow_(master, CONFIG.masterCatalogColumn, CONFIG.startRow);
+  const uLast = getLastNonEmptyRow_(updater, CONFIG.updaterCatalogColumn, CONFIG.startRow);
+  if (mLast < 2 || uLast < 2) throw new Error('No catalog numbers found in the required columns.');
+  const mCount = mLast - 1, uCount = uLast - 1;
+  const mData = master.getRange(2, 4, mCount, 1).getDisplayValues();
+  const uRange = updater.getRange(2, 1, uCount, 2);
+  const uDisplay = uRange.getDisplayValues(), uRaw = uRange.getValues();
+  const masters = mData.map((r, i) => ({ i, catalog: r[0], key: normaliseCatalog_(r[0]) })).filter(x => x.key);
+  const sources = uDisplay.map((r, i) => ({
+    i, key: normaliseCatalog_(r[0]), catalog: uRaw[i][0], price: uRaw[i][1]
+  })).filter(x => x.key);
+  const output = Array.from({ length: mCount }, () => ['', '', '']);
+  const usedM = new Set(), usedU = new Set();
+  const counts = { 100: 0, 95: 0, 90: 0, 80: 0, 40: 0 };
+  const tiers = [100, 95, 90, 80, 40];
+  const exact = new Map();
+  sources.forEach(u => {
+    if (!exact.has(u.key)) exact.set(u.key, []);
+    exact.get(u.key).push(u);
+  });
+  masters.forEach(m => {
+    const bucket = exact.get(m.key);
+    if (!bucket || !bucket.length) return;
+    const u = bucket.shift();
+    usedM.add(m.i); usedU.add(u.i);
+    output[m.i] = [u.price, u.catalog, '100%'];
+    counts[100]++;
+  });
+  const cache = new Map();
+  [95, 90, 80, 40].forEach(tier => {
+    const candidates = [];
+    masters.filter(m => !usedM.has(m.i)).forEach(m => {
+      sources.filter(u => !usedU.has(u.i)).forEach(u => {
+        const maxLen = Math.max(m.key.length, u.key.length);
+        if (100 * (1 - Math.abs(m.key.length - u.key.length) / maxLen) < tier) return;
+        const cacheKey = JSON.stringify([m.key, u.key]);
+        let score = cache.get(cacheKey);
+        if (score === undefined) {
+          score = catalogSimilarity_(m.key, u.key);
+          cache.set(cacheKey, score);
+        }
+        if (tiers.find(t => score + 1e-9 >= t) === tier) candidates.push({ m, u, score });
+      });
+    });
+    candidates.sort((a, b) => b.score - a.score || a.m.i - b.m.i || a.u.i - b.u.i);
+    candidates.forEach(({ m, u }) => {
+      if (usedM.has(m.i) || usedU.has(u.i)) return;
+      usedM.add(m.i); usedU.add(u.i);
+      output[m.i] = [u.price, u.catalog, tier + '%'];
+      counts[tier]++;
     });
   });
+  const summary = tiers.map(t => t + '%: ' + counts[t]).join(' | ');
+  const ui = SpreadsheetApp.getUi();
+  const choice = ui.alert('Five-pass match preview',
+    summary + '\nUnmatched master rows: ' + (masters.length - usedM.size) +
+    '\n\nApply results to Sheet1 columns Z:AB? Existing results will be replaced.',
+    ui.ButtonSet.YES_NO);
+  if (choice !== ui.Button.YES) return;
+  master.getRange(2, 26, mCount, 3).setValues(output);
+  ss.toast(summary, 'Five-pass price matching', 10);
+}
 
-  const output = [];
-  const masterCatalogKeys = new Set();
-  const missingFromPriceUpdater = [];
-  let catalogRowsChecked = 0;
-  let matchedRows = 0;
-
-  masterCatalogs.forEach((row) => {
-    const shownCatalog = row[0];
-    const key = normaliseCatalog_(shownCatalog);
-
-    if (!key) {
-      output.push(['', '']);
-      return;
+function catalogSimilarity_(a, b) {
+  if (a === b) return 100;
+  const longest = Math.max(a.length, b.length);
+  if (!longest) return 100;
+  let prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    const cur = [i];
+    for (let j = 1; j <= b.length; j++) {
+      cur[j] = Math.min(cur[j - 1] + 1, prev[j] + 1,
+        prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
     }
-
-    catalogRowsChecked++;
-    masterCatalogKeys.add(key);
-
-    const match = updaterByCatalog.get(key);
-
-    if (match) {
-      // Z receives Price updater column B; AA receives Price updater column A.
-      output.push([match.price, match.catalog]);
-      matchedRows++;
-    } else {
-      output.push(['', '']);
-      missingFromPriceUpdater.push(shownCatalog);
-    }
-  });
-
-  masterSheet
-    .getRange(CONFIG.startRow, CONFIG.outputStartColumn, masterRowCount, 2)
-    .setValues(output);
-
-  const missingFromMaster = updaterDisplay
-    .map((row) => row[0])
-    .filter((catalog) => {
-      const key = normaliseCatalog_(catalog);
-      return key && !masterCatalogKeys.has(key);
-    });
-
-  SpreadsheetApp.flush();
-
-  showReport_({
-    catalogRowsChecked: catalogRowsChecked,
-    matchedRows: matchedRows,
-    missingFromPriceUpdater: uniqueSorted_(missingFromPriceUpdater),
-    missingFromMaster: uniqueSorted_(missingFromMaster),
-    duplicatesInUpdater: uniqueSorted_(duplicatesInUpdater)
-  });
-
-  spreadsheet.toast(
-    matchedRows + ' matched; ' + missingFromPriceUpdater.length + ' not matched.',
-    'Price Update Complete',
-    8
-  );
+    prev = cur;
+  }
+  return 100 * (1 - prev[b.length] / longest);
 }
 
 function normaliseCatalog_(catalog) {
